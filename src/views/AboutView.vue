@@ -1,5 +1,16 @@
 <template>
   <div class="about">
-    <h1>This is an about page</h1>
+    <h1>This is an {{ pageName }} page</h1>
   </div>
 </template>
+<script>
+import { ref } from "vue";
+export default {
+  setup() {
+    const pageName = ref("about");
+    return {
+      pageName,
+    };
+  },
+};
+</script>

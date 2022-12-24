@@ -7,7 +7,7 @@
 import { ref } from "vue";
 export default {
   setup() {
-    const pageName = ref("home");
+    const pageName = ref("other");
     return {
       pageName,
     };
