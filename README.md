@@ -1,5 +1,5 @@
 ## 自动引入文件并执行
-1. autoimport.config 里面配置文件的名称，配置后会读取文件并在打包过程添加上
+1. autoimport.config 里面配置文件的名称，配置后在打包过程在该文件添加上
 ```js
 import useHeader from '@/hooks/header'
 
