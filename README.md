@@ -7,3 +7,4 @@ import useHeader from '@/hooks/header'
 useHeader()
 ```
 2. 文件需要有script 并包含 setup(){}
+3. 需要添加在vue-loader执行之前
