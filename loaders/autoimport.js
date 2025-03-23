@@ -3,127 +3,137 @@ const { parse: babelParse } = require("@babel/parser");
 const traverse = require("@babel/traverse").default;
 const generator = require("@babel/generator").default;
 const t = require("@babel/types");
+const path = require("path");
 
-const autoImportConfig = require("../autoimport.config");
+// 配置常量
+const CONFIG = {
+  EXECUTE_NAME: "useHeader",
+  FILE_PATH: "@/hooks/header",
+  TRACK_FILES: require("../autoimport.config").keys(), // 埋点配置文件
+};
 
-const EXECUTE_NAME = "useHeader";
-const FILE_PATH = "/hooks/header";
+module.exports = function (source) {
+  const filePath = normalizePath(this.resourcePath);
 
-module.exports = function (context) {
-  // 处理window上面路径\
-  const resource = transWin(this.resource);
-  // 判断配置文件是否有配置当前页面
-  const needAddFlag = autoImportConfig.some(
-    (i) => resource.indexOf(i + ".vue") >= 0
-  );
+  // 快速过滤无需处理的文件
+  if (!shouldProcess(filePath, CONFIG.TRACK_FILES)) return source;
 
-  if (!needAddFlag) return context;
-  // 利用sfc包 获取里面的script，并转化为ast
-  const descriptor = parse(context).descriptor;
-  let ast;
-  if (descriptor.script) {
-    ast = babelParse(descriptor.script.content, {
-      sourceType: "module",
-    });
-  } else {
-    return context;
-  }
+  // 解析SFC
+  const { descriptor } = parse(source);
+  if (!descriptor.script) return source;
 
-  let hasImportHeader = false; // 是否需要插入import语句
+  // 转换AST
+  const ast = babelParse(descriptor.script.content, {
+    sourceType: "module",
+    plugins: ["typescript"],
+  });
+
+  // AST处理逻辑
+  processAST(ast, CONFIG);
+
+  // 生成新代码
+  const newScriptContent = generateCode(ast);
+  return regenerateSFC(descriptor, newScriptContent);
+};
+
+// ---------- 工具函数 ----------
+function normalizePath(filePath) {
+  return filePath.split(path.sep).join("/");
+}
+
+function shouldProcess(filePath, trackFiles) {
+  const fileName = path.basename(filePath, ".vue");
+  return trackFiles.some((name) => name === fileName);
+}
+
+// ---------- AST处理核心 ----------
+function processAST(ast, config) {
+  let isImported = false;
+  let setupFunction = null;
+
   traverse(ast, {
-    Program: (nodePath) => {
-      const bodyPath = nodePath.get("body");
-      if (!bodyPath) return;
-      // 是否已经引入文件，如果有引入不会再插入import 和 执行语句
-      for (let path of bodyPath) {
-        if (path.isImportDeclaration()) {
-          if (
-            path.get("source").isStringLiteral() &&
-            path.get("source").node.value.indexOf(FILE_PATH) > 0
-          ) {
-            hasImportHeader = true;
-            break;
-          }
-        }
+    ImportDeclaration(path) {
+      if (path.node.source.value === config.FILE_PATH) {
+        isImported = true;
+        path.stop();
       }
+    },
 
-      if (!hasImportHeader) {
-        // 插入import ... from
-        const importDeclaration = t.importDeclaration(
-          [t.importDefaultSpecifier(t.identifier(EXECUTE_NAME))],
-          t.stringLiteral("@" + FILE_PATH)
-        );
-        bodyPath[0].insertBefore(importDeclaration);
+    ExportDefaultDeclaration(path) {
+      const setupProp = path
+        .get("declaration")
+        .get("properties")
+        .find((p) => p.get("key").isIdentifier({ name: "setup" }));
 
-        // 插入 userHeader()，需要有setup，默认插入在return语句之前，没有return语句插入在最前面
-        for (let path of bodyPath) {
-          if (path.isExportDefaultDeclaration()) {
-            const properties = path.get("declaration").node.properties;
-            if (properties && properties.length) {
-              for (let property of properties) {
-                if (property.key && property.key.name == "setup") {
-                  let insertIdx = 0;
-                  try {
-                    let idx = property.body.body.findIndex(
-                      (i) => i.type == "ReturnStatement"
-                    );
-                    if (idx !== undefined) insertIdx = idx;
-                    const expressionStatement = t.expressionStatement(
-                      t.callExpression(t.identifier(EXECUTE_NAME), [])
-                    );
-                    property.body.body.splice(
-                      insertIdx,
-                      0,
-                      expressionStatement
-                    );
-                  } catch (e) {
-                    console.log(
-                      `================\n${resource}，插入执行header失败\n================`
-                    );
-                  }
-                }
-              }
-            }
-          }
-        }
+      if (setupProp) {
+        setupFunction = setupProp.get("value");
       }
     },
   });
 
-  const { code } = generator(ast);
-  descriptor.script.content = code;
-  context = generateSfc(descriptor);
+  // 插入import
+  if (!isImported) {
+    injectImport(ast, config);
+  }
 
-  return context;
-};
-
-function transWin(str) {
-  if (!str) return str;
-  return str.split("\\").join("/");
+  // 插入执行语句
+  if (setupFunction) {
+    injectFunctionCall(setupFunction, config.EXECUTE_NAME);
+  }
 }
 
-function generateSfc(descriptor) {
-  let result = "";
-
-  const { template, script, scriptSetup, styles, customBlocks } = descriptor;
-  [template, script, scriptSetup, ...styles, ...customBlocks].forEach(
-    (block) => {
-      if (block && block.type) {
-        result += `<${block.type}${Object.entries(block.attrs).reduce(
-          (attrCode, [attrName, attrValue]) => {
-            if (attrValue === true) {
-              attrCode += ` ${attrName}`;
-            } else {
-              attrCode += ` ${attrName}="${attrValue}"`;
-            }
-
-            return attrCode;
-          },
-          " "
-        )}>${block.content}</${block.type}>`;
-      }
-    }
+function injectImport(ast, { EXECUTE_NAME, FILE_PATH }) {
+  const importNode = t.importDeclaration(
+    [t.importDefaultSpecifier(t.identifier(EXECUTE_NAME))],
+    t.stringLiteral(FILE_PATH)
   );
 
-  return result;
+  ast.program.body.unshift(importNode);
+}
+
+function injectFunctionCall(setupFunction, funcName) {
+  const blockStatement = setupFunction.get("body");
+
+  // 优先插入到return语句前
+  const returnIndex = blockStatement.node.body.findIndex(
+    (n) => n.type === "ReturnStatement"
+  );
+
+  const position = returnIndex !== -1 ? returnIndex : 0;
+  const callExpression = t.expressionStatement(
+    t.callExpression(t.identifier(funcName), [])
+  );
+
+  blockStatement.node.body.splice(position, 0, callExpression);
+}
+
+// ---------- SFC生成 ----------
+function generateCode(ast) {
+  return generator(ast, {
+    retainLines: true,
+    compact: false,
+  }).code;
+}
+
+function regenerateSFC(descriptor, scriptContent) {
+  const { template, styles, customBlocks } = descriptor;
+
+  return [
+    template?.content ? `<template>${template.content}</template>` : "",
+    `<script>\n${scriptContent}\n</script>`,
+    ...styles.map(
+      (s) => `<style ${attrsToString(s.attrs)}>${s.content}</style>`
+    ),
+    ...customBlocks.map(
+      (b) => `<${b.type} ${attrsToString(b.attrs)}>${b.content}</${b.type}>`
+    ),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function attrsToString(attrs) {
+  return Object.entries(attrs)
+    .map(([k, v]) => (v === true ? k : `${k}="${v}"`))
+    .join(" ");
 }
